@@ -1,13 +1,11 @@
 # Mergeant Extension For Quarto
 
-_TODO_: Add a short description of your extension.
+Creates a small widget to keep track of edits to be made in articles locally.
 
 ## Installing
 
-_TODO_: Replace the `<github-organization>` with your GitHub organization.
-
 ```bash
-quarto add <github-organization>/mergeant
+quarto add janithwanni/mergeant
 ```
 
 This will install the extension under the `_extensions` subdirectory.
@@ -15,7 +13,17 @@ If you're using version control, you will want to check in this directory.
 
 ## Using
 
-_TODO_: Describe how to use your extension.
+To use the extension simply add the extension as a filter to the qmd file.
+
+```
+---
+title: "Mergeant Example"
+filters:
+  - mergeant
+---
+```
+
+Once you preview the website, select any text to start annotating and the changes can be viewed from the bubble in the bottom right corner.
 
 ## Example
 
