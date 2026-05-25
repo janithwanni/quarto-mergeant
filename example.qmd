@@ -1,0 +1,11 @@
+---
+title: "Mergeant Example"
+filters:
+  - mergeant
+---
+
+## Heading
+
+This filter adds formatting to heading text.
+
+
