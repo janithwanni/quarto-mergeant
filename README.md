@@ -5,7 +5,7 @@ Creates a small widget to keep track of edits to be made in articles locally.
 ## Installing
 
 ```bash
-quarto add janithwanni/mergeant
+quarto add janithwanni/quarto-mergeant
 ```
 
 This will install the extension under the `_extensions` subdirectory.
