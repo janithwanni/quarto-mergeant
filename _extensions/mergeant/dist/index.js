@@ -15057,8 +15057,8 @@ var IndexedDBStorageAdapter = class {
 //#region src/main.js
 console.log("start automerge");
 var DOC_KEY = "quarto-annotations-doc-url";
-var AUTOMERGE_SYNC_SERVER = "http://203.101.229.30:3030";
-var AUTOMERGE_WS_SERVER = "ws://203.101.229.30:3030";
+var AUTOMERGE_SYNC_SERVER = "https://automerge-sync-server.janithwanni.com";
+var AUTOMERGE_WS_SERVER = "wss://automerge-sync-server.janithwanni.com";
 function autoTag() {
 	const root = document.querySelector("main.content") || document.querySelector("#quarto-content") || document.body;
 	let currentSection = "Preamble";
