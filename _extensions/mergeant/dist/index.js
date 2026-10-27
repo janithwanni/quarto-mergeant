@@ -14937,6 +14937,129 @@ function joinMessage(senderId, peerMetadata) {
 (0, import_browser.default)("WebsocketServer");
 var { encode, decode } = cbor_exports;
 //#endregion
+//#region node_modules/@automerge/automerge-repo-network-broadcastchannel/dist/index.js
+/**
+*
+* A `NetworkAdapter` which uses [BroadcastChannel](https://developer.mozilla.org/en-US/docs/Web/API/BroadcastChannel)
+* to communicate with other peers in the same browser tab. This is a bit of a
+* hack because `NetworkAdapter`s are supposed to be used as point to
+* point communication channels. To get around this the {@link BroadcastChannelNetworkAdapter}
+* broadcasts messages to all peers and then filters out messages not intended
+* for the current peer. This is quite inefficient as messages get duplicated
+* for every peer in the tab, but as it's all local communication anyway
+* it's not too bad. If efficiency is becoming an issue you can switch to
+* `automerge-repo-network-messagechannel`.
+*
+* @module
+*
+*/
+var BroadcastChannelNetworkAdapter = class extends NetworkAdapter {
+	#broadcastChannel;
+	#disconnected = false;
+	#ready = false;
+	#markReady = () => {};
+	#readyPromise;
+	#options;
+	#connectedPeers = [];
+	isReady() {
+		return this.#ready;
+	}
+	whenReady() {
+		return this.#readyPromise;
+	}
+	constructor(options) {
+		super();
+		this.#options = {
+			channelName: "broadcast",
+			peerWaitMs: 1e3,
+			...options ?? {}
+		};
+		this.#broadcastChannel = new BroadcastChannel(this.#options.channelName);
+		this.#readyPromise = new Promise((resolve) => {
+			this.#markReady = () => {
+				this.#ready = true;
+				resolve();
+			};
+			setTimeout(() => this.#markReady(), this.#options.peerWaitMs);
+		});
+	}
+	connect(peerId, peerMetadata) {
+		this.peerId = peerId;
+		this.peerMetadata = peerMetadata;
+		this.#disconnected = false;
+		this.#broadcastChannel.addEventListener("message", (e) => {
+			const message = e.data;
+			if ("targetId" in message && message.targetId !== this.peerId) return;
+			if (this.#disconnected) return;
+			const { senderId, type } = message;
+			switch (type) {
+				case "arrive":
+					{
+						const { peerMetadata } = message;
+						this.#broadcastChannel.postMessage({
+							senderId: this.peerId,
+							targetId: senderId,
+							type: "welcome",
+							peerMetadata: this.peerMetadata
+						});
+						this.#announceConnection(senderId, peerMetadata);
+					}
+					break;
+				case "welcome":
+					{
+						const { peerMetadata } = message;
+						this.#announceConnection(senderId, peerMetadata);
+					}
+					break;
+				case "leave":
+					this.#connectedPeers = this.#connectedPeers.filter((p) => p !== senderId);
+					this.emit("peer-disconnected", { peerId: senderId });
+					break;
+				default:
+					if (!("data" in message)) this.emit("message", message);
+					else {
+						if (!message.data) throw new Error("We got a message without data, we can't send this.");
+						const data = message.data;
+						this.emit("message", {
+							...message,
+							data: new Uint8Array(data)
+						});
+					}
+					break;
+			}
+		});
+		this.#broadcastChannel.postMessage({
+			senderId: this.peerId,
+			type: "arrive",
+			peerMetadata
+		});
+	}
+	#announceConnection(peerId, peerMetadata) {
+		this.#markReady();
+		this.#connectedPeers.push(peerId);
+		this.emit("peer-candidate", {
+			peerId,
+			peerMetadata
+		});
+	}
+	send(message) {
+		if (this.#disconnected) return false;
+		if ("data" in message) this.#broadcastChannel.postMessage({
+			...message,
+			data: message.data ? message.data.buffer.slice(message.data.byteOffset, message.data.byteOffset + message.data.byteLength) : void 0
+		});
+		else this.#broadcastChannel.postMessage(message);
+	}
+	disconnect() {
+		this.#broadcastChannel.postMessage({
+			senderId: this.peerId,
+			type: "leave"
+		});
+		for (const peerId of this.#connectedPeers) this.emit("peer-disconnected", { peerId });
+		this.#disconnected = true;
+	}
+};
+//#endregion
 //#region node_modules/@automerge/automerge-repo-storage-indexeddb/dist/index.js
 /**
 * This module provides a storage adapter for IndexedDB.
@@ -15056,9 +15179,6 @@ var IndexedDBStorageAdapter = class {
 //#endregion
 //#region src/main.js
 console.log("start automerge");
-var DOC_KEY = "quarto-annotations-doc-url";
-var AUTOMERGE_SYNC_SERVER = "https://automerge-sync.janithwanni.com";
-var AUTOMERGE_WS_SERVER = "wss://automerge-sync.janithwanni.com";
 function autoTag() {
 	const root = document.querySelector("main.content") || document.querySelector("#quarto-content") || document.body;
 	let currentSection = "Preamble";
@@ -15267,54 +15387,110 @@ function injectStyles() {
 var repo;
 var docHandle;
 var annotations = [];
-async function saveStore() {
-	console.log("changing doc with", annotations);
-	await docHandle.change((doc) => {
-		if (!doc.annotations) doc.annotations = [];
-		doc.annotations.splice(0);
-		for (const a of annotations) doc.annotations.push({
-			id: a.id,
-			section: a.section,
-			paragraph: a.paragraph,
-			occurrenceIndex: a.occurrenceIndex,
-			highlight: a.highlight,
-			comment: a.comment,
-			timestamp: a.timestamp,
-			url: a.url
-		});
+var FIELDS = [
+	"id",
+	"section",
+	"paragraph",
+	"occurrenceIndex",
+	"highlight",
+	"comment",
+	"timestamp",
+	"url"
+];
+/**
+* Config injected by the mergeant Lua filter. docKey is a 40-char sha1 hex
+* string identifying the source document; sync is "local" or a ws(s):// URL.
+*/
+function readConfig() {
+	const el = document.getElementById("mergeant-config");
+	let config = {};
+	try {
+		config = el ? JSON.parse(el.textContent) : {};
+	} catch (_) {}
+	return {
+		docKey: config.docKey || null,
+		sync: config.sync || "local"
+	};
+}
+async function sha1Hex(text) {
+	const buf = await crypto.subtle.digest("SHA-1", new TextEncoder().encode(text));
+	return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+function hexToBytes(hex) {
+	const bytes = new Uint8Array(hex.length / 2);
+	for (let i = 0; i < bytes.length; i++) bytes[i] = parseInt(hex.slice(i * 2, i * 2 + 2), 16);
+	return bytes;
+}
+/**
+* Every client builds this exact same initial change (fixed actor, fixed
+* time), so docs created independently for the same docKey share history
+* and merge cleanly instead of conflicting on `annotations`.
+*/
+function genesis() {
+	return save(change(init({ actor: "00".repeat(16) }), {
+		time: 0,
+		message: "mergeant init"
+	}, (d) => {
+		d.annotations = {};
+	}));
+}
+async function resolveDocHandle(docKey) {
+	const url = stringifyAutomergeUrl(hexToBytes(docKey.slice(0, 32)));
+	const { documentId } = parseAutomergeUrl(url);
+	try {
+		return await repo.find(url, { signal: AbortSignal.timeout(3e3) });
+	} catch (_) {
+		const handle = repo.import(genesis(), { docId: documentId });
+		handle.doneLoading();
+		return handle;
+	}
+}
+function readAnnotations() {
+	const doc = docHandle.doc();
+	return Object.values(doc?.annotations || {}).map((a) => ({ ...a })).sort((a, b) => a.timestamp.localeCompare(b.timestamp));
+}
+function putAnnotation(entry) {
+	docHandle.change((doc) => {
+		if (!doc.annotations) doc.annotations = {};
+		const record = {};
+		for (const k of FIELDS) if (entry[k] != null) record[k] = entry[k];
+		doc.annotations[String(entry.id)] = record;
 	});
 }
-async function loadStore() {
-	annotations = [...(await docHandle.doc()).annotations || []];
+function removeAnnotations(ids) {
+	docHandle.change((doc) => {
+		for (const id of ids) delete doc.annotations[String(id)];
+	});
 }
 async function initAutomerge() {
+	const { docKey, sync } = readConfig();
+	const network = [new BroadcastChannelNetworkAdapter()];
+	const useServer = /^wss?:\/\//.test(sync);
+	const key = docKey || await sha1Hex("page|" + location.pathname);
+	if (useServer) {
+		const base = sync.replace(/\/+$/, "");
+		network.push(new WebSocketClientAdapter(`${base}/sync/${key}`));
+	}
 	repo = new Repo({
-		network: [new WebSocketClientAdapter(AUTOMERGE_WS_SERVER)],
+		network,
 		storage: new IndexedDBStorageAdapter()
 	});
-	localStorage.getItem(DOC_KEY);
-	async function resolveDocHandle(pageUrl) {
-		const base = AUTOMERGE_SYNC_SERVER;
-		const candidate = repo.create({ annotations: [] });
-		const { docUrl, created } = await (await fetch(`${base}/doc-for-page`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				pageUrl,
-				docUrl: candidate.url
-			})
-		})).json();
-		if (created) return candidate;
-		else return repo.find(docUrl);
-	}
-	docHandle = await resolveDocHandle(window.location.href);
+	docHandle = await resolveDocHandle(key);
 	await docHandle.whenReady();
-	annotations = [...(await docHandle.doc()).annotations || []];
-	docHandle.on("change", async () => {
-		annotations = [...(await docHandle.doc()).annotations || []];
-		reApplyAllHighlights();
-		renderPanel();
-	});
+	annotations = readAnnotations();
+}
+/** Rebuild highlights and the panel from the current doc state. */
+function refresh() {
+	document.querySelectorAll(".anno-highlight").forEach(unwrapMark);
+	annotations = readAnnotations();
+	reApplyAllHighlights();
+	renderPanel();
+}
+function unwrapMark(mark) {
+	const p = mark.parentNode;
+	while (mark.firstChild) p.insertBefore(mark.firstChild, mark);
+	p.removeChild(mark);
+	p.normalize();
 }
 function reApplyAllHighlights() {
 	annotations.forEach((a) => {
@@ -15443,10 +15619,10 @@ function cancelPopup() {
 	pending = null;
 	window.getSelection()?.removeAllRanges();
 }
-async function saveAnnotation() {
+function saveAnnotation() {
 	if (!pending) return;
 	const comment = document.getElementById("anno-comment").value.trim();
-	const entry = {
+	putAnnotation({
 		id: Date.now(),
 		section: pending.section,
 		paragraph: pending.para,
@@ -15455,12 +15631,8 @@ async function saveAnnotation() {
 		comment,
 		timestamp: (/* @__PURE__ */ new Date()).toISOString(),
 		url: location.href
-	};
-	annotations.push({ ...entry });
-	await saveStore();
-	wrapRange(pending.range, entry.id);
+	});
 	cancelPopup();
-	renderPanel();
 	if (!panelOpen) flashFab();
 }
 function flashFab() {
@@ -15498,26 +15670,11 @@ function renderPanel() {
 	});
 }
 function deleteAnno(id) {
-	annotations = annotations.filter((a) => a.id !== id);
-	saveStore();
-	const mark = document.querySelector(`mark[data-anno-id="${id}"]`);
-	if (mark) {
-		const p = mark.parentNode;
-		while (mark.firstChild) p.insertBefore(mark.firstChild, mark);
-		p.removeChild(mark);
-	}
-	renderPanel();
+	removeAnnotations([id]);
 }
 function clearAll() {
 	if (!confirm("Delete all annotations from this page?")) return;
-	annotations = [];
-	saveStore();
-	document.querySelectorAll(".anno-highlight").forEach((m) => {
-		const p = m.parentNode;
-		while (m.firstChild) p.insertBefore(m.firstChild, m);
-		p.removeChild(m);
-	});
-	renderPanel();
+	removeAnnotations(annotations.map((a) => a.id));
 }
 function exportJSON() {
 	const clean = annotations.map(({ _missing, ...rest }) => rest);
@@ -15548,9 +15705,9 @@ async function boot() {
 	injectStyles();
 	autoTag();
 	await initAutomerge();
-	await loadStore();
 	reApplyAllHighlights();
 	buildUI();
+	docHandle.on("change", refresh);
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => boot());
 else boot();

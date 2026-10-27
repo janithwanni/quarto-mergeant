@@ -1,5 +1,7 @@
 ---
 title: "Mergeant Example"
+mergeant:
+  sync: local
 filters:
   - mergeant
 ---
