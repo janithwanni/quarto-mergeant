@@ -2101,6 +2101,37 @@ function merge(local, remote) {
 	return progressDocument(local, "merge", heads, localState.patchCallback);
 }
 /**
+* Get the binary representation of the last change which was made to this doc
+*
+* This is most useful when staying in sync with other peers, every time you
+* make a change locally via {@link change} you immediately call {@link
+* getLastLocalChange} and send the result over the network to other peers.
+*/
+function getLastLocalChange(doc) {
+	return _state(doc).handle.getLastLocalChange() || void 0;
+}
+/**
+* Apply changes received from another document
+*
+* `doc` will be updated to reflect the `changes`. If there are changes which
+* we do not have dependencies for yet those will be stored in the document and
+* applied when the depended on changes arrive.
+*
+* You can use the {@link ApplyOptions} to pass a patchcallback which will be
+* informed of any changes which occur as a result of applying the changes
+*
+*/
+function applyChanges$1(doc, changes, opts) {
+	const state = _state(doc);
+	if (!opts) opts = {};
+	if (state.heads) throw new RangeError("Attempting to change an outdated document.  Use Automerge.clone() if you wish to make a writable copy.");
+	if (_is_proxy(doc)) throw new RangeError("Calls to Automerge.change cannot be nested");
+	const heads = state.handle.getHeads();
+	state.handle.applyChanges(changes);
+	state.heads = heads;
+	return [progressDocument(doc, "applyChanges", heads, opts.patchCallback || state.patchCallback)];
+}
+/**
 * Create a set of patches representing the change from one set of heads to another
 *
 * If either of the heads are missing from the document the returned set of patches will be empty
@@ -15177,6 +15208,299 @@ var IndexedDBStorageAdapter = class {
 	}
 };
 //#endregion
+//#region src/review.js
+var STATUSES = [
+	"none",
+	"done",
+	"progress",
+	"incomplete"
+];
+var LABELS = {
+	none: "Unset",
+	done: "Done",
+	progress: "In progress",
+	incomplete: "Incomplete"
+};
+var handle;
+var outline = [];
+var expanded = /* @__PURE__ */ new Set();
+function initReview(docHandle) {
+	handle = docHandle;
+	injectReviewStyles();
+	outline = collectOutline();
+	buildReviewUI();
+	renderReview();
+	handle.on("change", renderReview);
+}
+/**
+* Group tagged paragraphs under the heading that precedes them.
+* Must run after autoTag() so p[data-para] exists.
+*/
+function collectOutline() {
+	const root = document.querySelector("main.content") || document.querySelector("#quarto-content") || document.body;
+	const sections = [];
+	let current = null;
+	let headingIndex = 0;
+	root.querySelectorAll("h1, h2, h3, h4, p[data-para]").forEach((node) => {
+		if (node.closest("#title-block-header, nav, footer")) return;
+		if (node.tagName !== "P") {
+			current = {
+				key: "s" + headingIndex++,
+				heading: node.dataset.sectionLabel || node.textContent.replace(/\s*#\s*$/, "").trim(),
+				element: node,
+				paras: []
+			};
+			sections.push(current);
+			return;
+		}
+		const text = node.textContent.trim();
+		if (text.length < 10) return;
+		if (!current) {
+			current = {
+				key: "s-preamble",
+				heading: "Preamble",
+				element: null,
+				paras: []
+			};
+			sections.push(current);
+		}
+		current.paras.push({
+			key: "p" + node.dataset.para,
+			text,
+			element: node
+		});
+	});
+	return sections.filter((s) => s.heading && s.paras.length);
+}
+function readStatuses() {
+	return handle.doc()?.statuses || {};
+}
+function statusOf(statuses, key) {
+	return STATUSES.includes(statuses[key]) ? statuses[key] : "none";
+}
+function cycleStatus(key) {
+	const cur = statusOf(readStatuses(), key);
+	const next = STATUSES[(STATUSES.indexOf(cur) + 1) % STATUSES.length];
+	handle.change((doc) => {
+		if (next === "none") delete doc.statuses[key];
+		else doc.statuses[key] = next;
+	});
+}
+function injectReviewStyles() {
+	const style = document.createElement("style");
+	style.textContent = `
+      [data-review-status] { border-left: 3px solid transparent; padding-left: 8px; margin-left: -11px; }
+      [data-review-status="done"]       { border-left-color: #2e7d32; }
+      [data-review-status="progress"]   { border-left-color: #e65100; }
+      [data-review-status="incomplete"] { border-left-color: #b71c1c; }
+
+      #rv-fab {
+        position: fixed; bottom: 24px; left: 24px; z-index: 99997;
+        width: 48px; height: 48px; border-radius: 50%; border: none;
+        background: #1a1a2e; color: #fff; font-size: 20px; cursor: pointer;
+        display: flex; align-items: center; justify-content: center; line-height: 1;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.18); transition: transform 0.15s, background 0.15s;
+      }
+      #rv-fab:hover { background: #2d2d4e; transform: scale(1.07); }
+      #rv-panel {
+        position: fixed; bottom: 84px; left: 24px; z-index: 99996;
+        width: 360px; max-width: calc(100vw - 48px); max-height: 75vh;
+        background: #fff; border: 1px solid #ddd; border-radius: 12px;
+        box-shadow: 0 6px 28px rgba(0,0,0,0.13);
+        font-family: system-ui, sans-serif; font-size: 13px; color: #111;
+        display: flex; flex-direction: column; overflow: hidden;
+        opacity: 0; pointer-events: none; transform: translateY(12px) scale(0.97);
+        transition: opacity 0.2s, transform 0.2s;
+      }
+      #rv-panel.open { opacity: 1; pointer-events: all; transform: none; }
+      #rv-header {
+        display: flex; align-items: center; gap: 8px; padding: 10px 14px;
+        border-bottom: 1px solid #eee;
+      }
+      #rv-header h4 { margin: 0; font-size: 13px; font-weight: 600; flex: 1; }
+      #rv-close {
+        border: none; background: none; cursor: pointer; color: #888;
+        font-size: 16px; padding: 0; line-height: 1;
+      }
+      #rv-legend {
+        display: flex; flex-wrap: wrap; gap: 10px; padding: 7px 14px;
+        border-bottom: 1px solid #eee; background: #f9f8f5;
+      }
+      .rv-legend-item { display: flex; align-items: center; gap: 4px; font-size: 11px; color: #6b6a64; }
+      .rv-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; display: inline-block; }
+      .rv-dot-none       { background: #d0cec6; }
+      .rv-dot-done       { background: #2e7d32; }
+      .rv-dot-progress   { background: #e65100; }
+      .rv-dot-incomplete { background: #b71c1c; }
+      #rv-body { overflow-y: auto; flex: 1; }
+      .rv-section { border-bottom: 1px solid #f0ede6; }
+      .rv-section:last-child { border-bottom: none; }
+      .rv-section-header {
+        display: flex; align-items: center; gap: 8px; padding: 9px 12px 9px 14px; user-select: none;
+      }
+      .rv-chevron {
+        border: none; background: none; cursor: pointer; padding: 0; color: #9e9c95;
+        font-size: 14px; line-height: 1; transition: transform 0.18s;
+      }
+      .rv-section.expanded .rv-chevron { transform: rotate(90deg); }
+      .rv-section-label {
+        flex: 1; font-weight: 600; white-space: nowrap; overflow: hidden;
+        text-overflow: ellipsis; cursor: pointer;
+      }
+      .rv-pill {
+        border: none; cursor: pointer; flex-shrink: 0; font-family: inherit;
+        font-size: 10px; font-weight: 700; padding: 3px 9px; border-radius: 20px;
+        letter-spacing: 0.04em; white-space: nowrap; text-transform: uppercase;
+      }
+      .rv-pill:hover { opacity: 0.8; }
+      .rv-pill-none       { background: #eeece5; color: #7a7870; }
+      .rv-pill-done       { background: #e8f5e9; color: #1b5e20; }
+      .rv-pill-progress   { background: #fff3e0; color: #bf360c; }
+      .rv-pill-incomplete { background: #ffebee; color: #7f1010; }
+      .rv-paras { display: none; padding: 2px 12px 8px 30px; background: #fdfcfa; border-top: 1px solid #f0ede6; }
+      .rv-section.expanded .rv-paras { display: block; }
+      .rv-para-row {
+        display: flex; align-items: flex-start; gap: 8px; padding: 6px 4px;
+        border-radius: 6px; cursor: pointer;
+      }
+      .rv-para-row:hover { background: #f0ede6; }
+      .rv-para-row .rv-dot { margin-top: 5px; }
+      .rv-para-text {
+        flex: 1; font-size: 12px; color: #4a4845; line-height: 1.5; overflow: hidden;
+        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+      }
+      .rv-para-row .rv-pill { font-size: 9px; padding: 1px 6px; margin-top: 2px; opacity: 0; pointer-events: none; }
+      .rv-para-row:hover .rv-pill { opacity: 1; }
+      .rv-empty { text-align: center; color: #aaa; font-size: 12px; padding: 16px 0; }
+      #rv-progress { padding: 10px 14px 12px; border-top: 1px solid #eee; background: #f9f8f5; }
+      #rv-bar { height: 5px; border-radius: 10px; background: #e4e2db; overflow: hidden; display: flex; }
+      .rv-bar-seg { height: 100%; transition: width 0.3s; }
+      #rv-stats { display: flex; justify-content: space-between; margin-top: 5px; font-size: 11px; color: #9e9c95; }
+    `;
+	document.head.appendChild(style);
+}
+function buildReviewUI() {
+	const fab = document.createElement("button");
+	fab.id = "rv-fab";
+	fab.title = "Review status";
+	fab.innerHTML = "☑";
+	fab.setAttribute("aria-label", "Toggle review status panel");
+	document.body.appendChild(fab);
+	const panel = document.createElement("div");
+	panel.id = "rv-panel";
+	panel.setAttribute("role", "dialog");
+	panel.setAttribute("aria-label", "Review status");
+	panel.innerHTML = `
+      <div id="rv-header">
+        <h4>☑ Review status</h4>
+        <button id="rv-close" aria-label="Close panel">×</button>
+      </div>
+      <div id="rv-legend">
+        ${STATUSES.map((s) => `<span class="rv-legend-item"><span class="rv-dot rv-dot-${s}"></span>${LABELS[s]}</span>`).join("")}
+      </div>
+      <div id="rv-body"></div>
+      <div id="rv-progress">
+        <div id="rv-bar"></div>
+        <div id="rv-stats"><span id="rv-stats-paras"></span><span id="rv-stats-secs"></span></div>
+      </div>
+    `;
+	document.body.appendChild(panel);
+	fab.addEventListener("click", () => panel.classList.toggle("open"));
+	document.getElementById("rv-close").addEventListener("click", () => panel.classList.remove("open"));
+	document.addEventListener("keydown", (e) => {
+		if (e.key === "Escape") panel.classList.remove("open");
+	});
+}
+function pill(status, tag = "button") {
+	const el = document.createElement(tag);
+	el.className = `rv-pill rv-pill-${status}`;
+	el.textContent = LABELS[status];
+	return el;
+}
+function dot(status) {
+	const el = document.createElement("span");
+	el.className = `rv-dot rv-dot-${status}`;
+	return el;
+}
+function markElement(el, status) {
+	if (!el) return;
+	if (status === "none") delete el.dataset.reviewStatus;
+	else el.dataset.reviewStatus = status;
+}
+function renderReview() {
+	const statuses = readStatuses();
+	const body = document.getElementById("rv-body");
+	body.innerHTML = "";
+	if (!outline.length) body.innerHTML = "<p class=\"rv-empty\">No sections found on this page.</p>";
+	outline.forEach((section) => {
+		const secSt = statusOf(statuses, section.key);
+		markElement(section.element, secSt);
+		const wrap = document.createElement("div");
+		wrap.className = "rv-section";
+		if (expanded.has(section.key)) wrap.classList.add("expanded");
+		const toggle = () => {
+			if (wrap.classList.toggle("expanded")) expanded.add(section.key);
+			else expanded.delete(section.key);
+		};
+		const hdr = document.createElement("div");
+		hdr.className = "rv-section-header";
+		const chevron = document.createElement("button");
+		chevron.className = "rv-chevron";
+		chevron.textContent = "›";
+		chevron.setAttribute("aria-label", "Toggle section");
+		chevron.addEventListener("click", toggle);
+		const label = document.createElement("span");
+		label.className = "rv-section-label";
+		label.textContent = section.heading;
+		label.title = section.heading;
+		label.addEventListener("click", toggle);
+		const secPill = pill(secSt);
+		secPill.title = "Click to cycle section status";
+		secPill.setAttribute("aria-label", "Cycle status for section: " + section.heading);
+		secPill.addEventListener("click", () => cycleStatus(section.key));
+		hdr.append(chevron, label, secPill);
+		const paras = document.createElement("div");
+		paras.className = "rv-paras";
+		section.paras.forEach((para) => {
+			const pSt = statusOf(statuses, para.key);
+			markElement(para.element, pSt);
+			const row = document.createElement("div");
+			row.className = "rv-para-row";
+			row.title = "Click to cycle paragraph status";
+			const text = document.createElement("span");
+			text.className = "rv-para-text";
+			text.textContent = para.text;
+			row.append(dot(pSt), text, pill(pSt, "span"));
+			row.addEventListener("click", () => cycleStatus(para.key));
+			paras.appendChild(row);
+		});
+		wrap.append(hdr, paras);
+		body.appendChild(wrap);
+	});
+	renderProgress(statuses);
+}
+function renderProgress(statuses) {
+	const allParas = outline.flatMap((s) => s.paras);
+	const counts = {
+		none: 0,
+		done: 0,
+		progress: 0,
+		incomplete: 0
+	};
+	allParas.forEach((p) => counts[statusOf(statuses, p.key)]++);
+	const colors = {
+		done: "#2e7d32",
+		progress: "#e65100",
+		incomplete: "#b71c1c"
+	};
+	document.getElementById("rv-bar").innerHTML = Object.entries(colors).map(([s, c]) => {
+		return `<div class="rv-bar-seg" style="width:${(allParas.length ? counts[s] / allParas.length * 100 : 0).toFixed(1)}%;background:${c}"></div>`;
+	}).join("");
+	const secsDone = outline.filter((s) => statusOf(statuses, s.key) === "done").length;
+	document.getElementById("rv-stats-paras").textContent = `${counts.done}/${allParas.length} paragraphs done`;
+	document.getElementById("rv-stats-secs").textContent = `${secsDone}/${outline.length} sections done`;
+}
+//#endregion
 //#region src/main.js
 console.log("start automerge");
 function autoTag() {
@@ -15434,6 +15758,26 @@ function genesis() {
 		d.annotations = {};
 	}));
 }
+/**
+* `statuses` was added after `annotations`, so docs already exist without it.
+* Creating it lazily would let two clients each create their own map and
+* drop one's entries, so instead everyone applies this same deterministic
+* change on top of genesis (applying it twice is a no-op).
+*/
+var statusesInit;
+function statusesInitChange() {
+	if (!statusesInit) statusesInit = getLastLocalChange(change(load$2(genesis(), { actor: "00".repeat(16) }), {
+		time: 0,
+		message: "mergeant statuses init"
+	}, (d) => {
+		d.statuses = {};
+	}));
+	return statusesInit;
+}
+function ensureStatuses() {
+	if (docHandle.doc()?.statuses) return;
+	docHandle.update((doc) => applyChanges$1(doc, [statusesInitChange()])[0]);
+}
 async function resolveDocHandle(docKey) {
 	const url = stringifyAutomergeUrl(hexToBytes(docKey.slice(0, 32)));
 	const { documentId } = parseAutomergeUrl(url);
@@ -15477,6 +15821,7 @@ async function initAutomerge() {
 	});
 	docHandle = await resolveDocHandle(key);
 	await docHandle.whenReady();
+	ensureStatuses();
 	annotations = readAnnotations();
 }
 /** Rebuild highlights and the panel from the current doc state. */
@@ -15707,6 +16052,7 @@ async function boot() {
 	await initAutomerge();
 	reApplyAllHighlights();
 	buildUI();
+	initReview(docHandle);
 	docHandle.on("change", refresh);
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => boot());
