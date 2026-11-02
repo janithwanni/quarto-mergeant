@@ -25,11 +25,30 @@ filters:
 
 Once you preview the website, select any text to start annotating and the changes can be viewed from the bubble in the bottom right corner.
 
+### Annotations
+
+- **Your name**: the first time you annotate, enter your name in the popup. It is remembered in your browser and shown next to your comments and replies, and you can change it from the "Commenting as" field in the panel.
+- **Replies**: use _Reply_ on an annotation to discuss it with the writer or other reviewers.
+- **Edit and delete**: _Edit_ changes a comment's text; _Delete_ removes the annotation and its replies.
+- **Resolve**: once a comment has been addressed, _Resolve_ it. Resolved highlights turn green and dashed, and _Reopen_ brings them back.
+- **Filter and sort**: the _Open_ / _Resolved_ / _All_ tabs filter the list, and it can be sorted in document order or newest first. The bubble shows how many annotations are still open.
+- **Jump to the text**: click a quote in the panel to scroll to its highlight, or click a highlight to find its entry in the panel.
+- **Hide highlights**: the ◉ button in the panel header hides highlight styling so the page can be read clean.
+- **Sync status**: the panel header shows _Local_ (browser only), _Synced_ (connected to the sync server) or _Offline_ (changes are kept in the browser and sent on reconnect).
+- **Export**: download the annotations as a Markdown checklist grouped by section (handy as a to-do list for the writer), JSON or CSV.
+- **Clear**: deletes the annotations shown in the current tab, e.g. switch to _Resolved_ to clean up addressed comments.
+
+Ctrl+Enter (⌘+Enter on a Mac) saves a comment, reply or edit, and Escape cancels.
+
+If a paragraph's text changes so that a highlight can no longer be found, its annotation is greyed out with a warning but kept.
+When paragraphs are added or removed above an annotation, the highlight is found again by its text as long as that text appears only once on the page.
+
 ### Review status
 
 The ☑ button in the bottom left corner opens a list of the page's sections and their paragraphs.
 Click a section's pill, or a paragraph, to cycle its status through _Unset_ → _Done_ → _In progress_ → _Incomplete_.
 Marked sections and paragraphs get a coloured bar in the left margin of the page, and the panel footer shows how many are done.
+Sections and paragraphs with open annotations show a 💬 count, and the ↗ button scrolls the page to that section or paragraph.
 
 Statuses are stored and synced alongside the annotations, so the `sync` and `doc-id` options apply to them too.
 They are tied to the order of headings and paragraphs on the page, so adding or removing a heading or paragraph above one can move its status to a neighbour.
@@ -201,7 +220,12 @@ If you want the widget during review but not in the final published version, use
 mergeant:
   doc-id: my-paper-review       # optional, see below
   sync: local                   # or wss://your-sync-server
+  enabled: true                 # set to false to turn the widget off for a page
 ```
+
+### `enabled`
+
+Set `enabled: false` in a document's header to leave out the widget on that page, e.g. when the filter is turned on for a whole project in `_quarto.yml`.
 
 ### `doc-id`
 

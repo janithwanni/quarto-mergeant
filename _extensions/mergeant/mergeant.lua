@@ -19,6 +19,11 @@ function Pandoc(doc)
 	end
 
 	local opts = doc.meta.mergeant or {}
+	-- Lets a page opt out when the filter is enabled project-wide
+	if opts.enabled == false then
+		return doc
+	end
+
 	local sync = opts.sync and pandoc.utils.stringify(opts.sync) or "local"
 
 	local config = quarto.json.encode({

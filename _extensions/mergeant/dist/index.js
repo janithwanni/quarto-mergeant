@@ -15286,6 +15286,25 @@ function cycleStatus(key) {
 		else doc.statuses[key] = next;
 	});
 }
+/** Open (unresolved) annotation highlights per paragraph key, read from the page. */
+function openCommentCounts() {
+	const counts = {};
+	document.querySelectorAll(".anno-highlight:not(.anno-resolved)").forEach((mark) => {
+		const p = mark.closest("p[data-para]");
+		if (p) counts["p" + p.dataset.para] = (counts["p" + p.dataset.para] || 0) + 1;
+	});
+	return counts;
+}
+function jumpTo(el) {
+	if (!el) return;
+	el.scrollIntoView({
+		behavior: "smooth",
+		block: "center"
+	});
+	el.classList.remove("mg-flash");
+	el.offsetWidth;
+	el.classList.add("mg-flash");
+}
 function injectReviewStyles() {
 	const style = document.createElement("style");
 	style.textContent = `
@@ -15371,6 +15390,17 @@ function injectReviewStyles() {
       }
       .rv-para-row .rv-pill { font-size: 9px; padding: 1px 6px; margin-top: 2px; opacity: 0; pointer-events: none; }
       .rv-para-row:hover .rv-pill { opacity: 1; }
+      .rv-comments {
+        flex-shrink: 0; font-size: 10px; color: #a8650f; background: #faeeda;
+        border-radius: 8px; padding: 1px 6px; white-space: nowrap;
+      }
+      .rv-jump {
+        border: none; background: none; cursor: pointer; padding: 0 2px; color: #9e9c95;
+        font-size: 12px; line-height: 1; flex-shrink: 0;
+      }
+      .rv-jump:hover { color: #1a6fb5; }
+      .rv-para-row .rv-jump { opacity: 0; margin-top: 2px; }
+      .rv-para-row:hover .rv-jump, .rv-jump:focus-visible { opacity: 1; }
       .rv-empty { text-align: center; color: #aaa; font-size: 12px; padding: 16px 0; }
       #rv-progress { padding: 10px 14px 12px; border-top: 1px solid #eee; background: #f9f8f5; }
       #rv-bar { height: 5px; border-radius: 10px; background: #e4e2db; overflow: hidden; display: flex; }
@@ -15427,8 +15457,28 @@ function markElement(el, status) {
 	if (status === "none") delete el.dataset.reviewStatus;
 	else el.dataset.reviewStatus = status;
 }
+function commentBadge(n) {
+	const el = document.createElement("span");
+	el.className = "rv-comments";
+	el.textContent = "💬 " + n;
+	el.title = `${n} open comment${n === 1 ? "" : "s"}`;
+	return el;
+}
+function jumpButton(el, what) {
+	const btn = document.createElement("button");
+	btn.className = "rv-jump";
+	btn.textContent = "↗";
+	btn.title = "Go to " + what;
+	btn.setAttribute("aria-label", "Go to " + what);
+	btn.addEventListener("click", (e) => {
+		e.stopPropagation();
+		jumpTo(el);
+	});
+	return btn;
+}
 function renderReview() {
 	const statuses = readStatuses();
+	const comments = openCommentCounts();
 	const body = document.getElementById("rv-body");
 	body.innerHTML = "";
 	if (!outline.length) body.innerHTML = "<p class=\"rv-empty\">No sections found on this page.</p>";
@@ -15458,7 +15508,11 @@ function renderReview() {
 		secPill.title = "Click to cycle section status";
 		secPill.setAttribute("aria-label", "Cycle status for section: " + section.heading);
 		secPill.addEventListener("click", () => cycleStatus(section.key));
-		hdr.append(chevron, label, secPill);
+		hdr.append(chevron, label);
+		const secComments = section.paras.reduce((n, p) => n + (comments[p.key] || 0), 0);
+		if (secComments) hdr.append(commentBadge(secComments));
+		hdr.append(jumpButton(section.element || section.paras[0].element, "section"));
+		hdr.append(secPill);
 		const paras = document.createElement("div");
 		paras.className = "rv-paras";
 		section.paras.forEach((para) => {
@@ -15470,7 +15524,9 @@ function renderReview() {
 			const text = document.createElement("span");
 			text.className = "rv-para-text";
 			text.textContent = para.text;
-			row.append(dot(pSt), text, pill(pSt, "span"));
+			row.append(dot(pSt), text);
+			if (comments[para.key]) row.append(commentBadge(comments[para.key]));
+			row.append(jumpButton(para.element, "paragraph"), pill(pSt, "span"));
 			row.addEventListener("click", () => cycleStatus(para.key));
 			paras.appendChild(row);
 		});
@@ -15567,13 +15623,18 @@ function findTextRanges(paraEl, searchText) {
 * Returns true if the text was found and wrapped, false otherwise.
 */
 function reHighlight(annotation) {
-	if (!annotation.paragraph) return false;
-	const paraEl = document.querySelector(`[data-para="${annotation.paragraph}"]`);
-	if (!paraEl) return false;
-	const idx = annotation.occurrenceIndex ?? 0;
-	const range = findTextRanges(paraEl, annotation.highlight)[idx];
-	if (!range) return false;
-	wrapRange(range, annotation.id);
+	const paraEl = annotation.paragraph ? document.querySelector(`[data-para="${annotation.paragraph}"]`) : null;
+	if (paraEl) {
+		const idx = annotation.occurrenceIndex ?? 0;
+		const range = findTextRanges(paraEl, annotation.highlight)[idx];
+		if (range) {
+			wrapRange(range, annotation);
+			return true;
+		}
+	}
+	const matches = [...document.querySelectorAll("[data-para]")].flatMap((p) => findTextRanges(p, annotation.highlight));
+	if (matches.length !== 1) return false;
+	wrapRange(matches[0], annotation);
 	return true;
 }
 /**
@@ -15581,8 +15642,8 @@ function reHighlight(annotation) {
 * Uses surroundContents when possible; falls back to extractContents
 * for selections that cross element boundaries.
 */
-function wrapRange(range, id) {
-	const mark = createMark(id);
+function wrapRange(range, annotation) {
+	const mark = createMark(annotation);
 	try {
 		range.surroundContents(mark);
 	} catch (_) {
@@ -15591,22 +15652,54 @@ function wrapRange(range, id) {
 		range.insertNode(mark);
 	}
 }
-function createMark(id) {
+function createMark(annotation) {
+	const { id } = annotation;
 	const mark = document.createElement("mark");
-	mark.className = "anno-highlight";
+	mark.className = "anno-highlight" + (annotation.resolved ? " anno-resolved" : "");
 	mark.dataset.annoId = id;
-	mark.title = "Click to view annotation";
+	mark.title = (annotation.author ? annotation.author + ": " : "") + (annotation.comment || "(no comment)") + "\nClick to view annotation";
 	mark.addEventListener("click", () => {
+		if (document.body.classList.contains("anno-hide-highlights")) return;
+		if (filter !== "all" && filter !== (annotation.resolved ? "resolved" : "open")) filter = "all";
 		openPanel();
+		renderPanel();
 		setTimeout(() => {
 			const el = document.getElementById("ae-" + id);
-			if (el) el.scrollIntoView({
+			if (!el) return;
+			el.scrollIntoView({
 				behavior: "smooth",
 				block: "nearest"
 			});
+			flash(el);
 		}, 100);
 	});
 	return mark;
+}
+function flash(el) {
+	el.classList.remove("mg-flash");
+	el.offsetWidth;
+	el.classList.add("mg-flash");
+}
+/** Scroll the page to an annotation's highlight and flash it. */
+function jumpToHighlight(id) {
+	const mark = document.querySelector(`.anno-highlight[data-anno-id="${id}"]`);
+	if (!mark) return;
+	mark.scrollIntoView({
+		behavior: "smooth",
+		block: "center"
+	});
+	flash(mark);
+}
+var ESC = {
+	"&": "&amp;",
+	"<": "&lt;",
+	">": "&gt;",
+	"\"": "&quot;",
+	"'": "&#39;"
+};
+/** Escape user-supplied text before it goes into innerHTML. */
+function esc(value) {
+	return String(value ?? "").replace(/[&<>"']/g, (c) => ESC[c]);
 }
 function injectStyles() {
 	const style = document.createElement("style");
@@ -15673,15 +15766,10 @@ function injectStyles() {
       .anno-entry .e-meta { font-size: 11px; color: #888; margin-bottom: 3px; }
       .anno-entry .e-meta strong { color: #444; }
       .anno-entry .e-quote { font-style: italic; color: #666; font-size: 12px; }
-      .anno-entry .e-comment { color: #111; margin-top: 4px; font-size: 12px; }
+      .anno-entry .e-comment { color: #111; margin-top: 4px; font-size: 12px; white-space: pre-wrap; }
       .anno-entry .e-missing {
         font-size: 11px; color: #e07b39; margin-top: 3px; font-style: italic;
       }
-      .anno-entry .e-del {
-        float: right; background: none; border: none; cursor: pointer;
-        color: #bbb; font-size: 15px; line-height: 1; padding: 0; margin-left: 6px;
-      }
-      .anno-entry .e-del:hover { color: #c0392b; }
       #anno-panel-footer {
         padding: 8px 14px; border-top: 1px solid #eee; display: flex; gap: 6px;
       }
@@ -15697,6 +15785,7 @@ function injectStyles() {
         width: 48px; height: 48px; font-size: 22px; cursor: pointer;
         box-shadow: 0 4px 16px rgba(0,0,0,0.18);
         display: flex; align-items: center; justify-content: center; line-height: 1;
+        transition: transform 0.15s;
       }
       #anno-fab:hover { background: #155fa0; }
       #anno-hint {
@@ -15705,6 +15794,83 @@ function injectStyles() {
         font-size: 12px; padding: 6px 12px; border-radius: 6px;
         opacity: 0; pointer-events: none; transition: opacity 0.3s;
       }
+      .anno-highlight.anno-resolved { background: #eef3ee; border-bottom: 2px dashed #9bb59b; }
+      body.anno-hide-highlights .anno-highlight {
+        background: none; border-bottom: none; cursor: auto;
+      }
+      @keyframes mg-flash { 0%, 60% { box-shadow: 0 0 0 4px rgba(26,111,181,0.45); } 100% { box-shadow: none; } }
+      .mg-flash { animation: mg-flash 1.4s ease-out; }
+      #anno-popup .popup-author {
+        display: flex; align-items: center; gap: 6px; margin-bottom: 6px; font-size: 11px; color: #888;
+      }
+      #anno-popup .popup-author input, #anno-identity input {
+        flex: 1; font-size: 12px; padding: 3px 6px; border: 1px solid #ddd;
+        border-radius: 5px; font-family: inherit; background: #f8f8f6; color: #111;
+      }
+      #anno-fab-count {
+        position: absolute; top: -3px; right: -3px; min-width: 18px; height: 18px;
+        padding: 0 5px; box-sizing: border-box; border-radius: 9px;
+        background: #ef9f27; color: #fff; font-size: 11px; font-weight: 700;
+        display: flex; align-items: center; justify-content: center;
+      }
+      #anno-fab-count:empty { display: none; }
+      #anno-sync { font-size: 11px; color: #888; display: flex; align-items: center; gap: 4px; }
+      #anno-sync .sync-dot { width: 7px; height: 7px; border-radius: 50%; background: #bbb; }
+      #anno-sync[data-state="online"] .sync-dot { background: #2e7d32; }
+      #anno-sync[data-state="offline"] .sync-dot { background: #c0392b; }
+      #anno-panel-header button.hdr-btn {
+        font-size: 13px; color: #888; background: none; border: none;
+        cursor: pointer; padding: 0 2px; line-height: 1;
+      }
+      #anno-identity {
+        display: flex; align-items: center; gap: 6px; padding: 6px 14px;
+        border-bottom: 1px solid #eee; font-size: 11px; color: #888;
+      }
+      #anno-toolbar {
+        display: flex; align-items: center; gap: 4px; padding: 6px 14px;
+        border-bottom: 1px solid #eee; background: #fafaf8;
+      }
+      #anno-toolbar .tab {
+        font-size: 11px; padding: 2px 8px; border-radius: 10px; border: 1px solid transparent;
+        background: none; cursor: pointer; color: #666; font-family: inherit;
+      }
+      #anno-toolbar .tab.active { background: #fff; border-color: #ddd; color: #111; font-weight: 600; }
+      #anno-toolbar select {
+        margin-left: auto; font-size: 11px; border: 1px solid #ddd; border-radius: 5px;
+        background: #fff; color: #444; font-family: inherit; padding: 1px 2px;
+      }
+      .anno-entry.anno-is-resolved { border-left-color: #9bb59b; }
+      .anno-entry.anno-is-resolved .e-comment { color: #777; }
+      .anno-entry .e-quote { cursor: pointer; }
+      .anno-entry .e-quote:hover { color: #1a6fb5; }
+      .anno-entry .e-author { font-size: 11px; color: #888; margin-top: 2px; }
+      .anno-entry .e-resolved-tag {
+        font-size: 10px; font-weight: 600; color: #4f7a4f; background: #e5efe5;
+        padding: 0 5px; border-radius: 8px; margin-left: 4px;
+      }
+      .anno-entry .e-replies { margin-top: 6px; border-top: 1px dashed #e4e2db; padding-top: 4px; }
+      .anno-entry .e-reply { font-size: 12px; margin-top: 3px; white-space: pre-wrap; }
+      .anno-entry .e-reply strong { color: #444; font-weight: 600; }
+      .anno-entry .e-reply time { font-size: 10px; color: #bbb; margin-left: 4px; }
+      .anno-entry .e-actions { display: flex; gap: 10px; margin-top: 5px; }
+      .anno-entry .e-actions button {
+        font-size: 11px; color: #1a6fb5; background: none; border: none;
+        padding: 0; cursor: pointer; font-family: inherit;
+      }
+      .anno-entry .e-actions button:hover { text-decoration: underline; }
+      .anno-entry .e-actions button[data-act="delete"] { color: #b05050; margin-left: auto; }
+      .anno-entry .e-form { margin-top: 6px; }
+      .anno-entry .e-form textarea {
+        width: 100%; box-sizing: border-box; min-height: 48px; font-size: 12px;
+        resize: vertical; border: 1px solid #ddd; border-radius: 6px;
+        padding: 5px 7px; font-family: inherit; background: #fff; color: #111;
+      }
+      .anno-entry .e-form .e-form-btns { display: flex; gap: 6px; justify-content: flex-end; margin-top: 4px; }
+      .anno-entry .e-form button {
+        font-size: 11px; padding: 3px 10px; border-radius: 5px; border: 1px solid #ccc;
+        background: transparent; cursor: pointer; font-family: inherit;
+      }
+      .anno-entry .e-form button[data-act$="-save"] { background: #1a6fb5; border-color: #1a6fb5; color: #fff; }
     `;
 	document.head.appendChild(style);
 }
@@ -15719,7 +15885,8 @@ var FIELDS = [
 	"highlight",
 	"comment",
 	"timestamp",
-	"url"
+	"url",
+	"author"
 ];
 /**
 * Config injected by the mergeant Lua filter. docKey is a 40-char sha1 hex
@@ -15796,9 +15963,48 @@ function readAnnotations() {
 function putAnnotation(entry) {
 	docHandle.change((doc) => {
 		if (!doc.annotations) doc.annotations = {};
-		const record = {};
+		const record = {
+			resolved: false,
+			replies: {}
+		};
 		for (const k of FIELDS) if (entry[k] != null) record[k] = entry[k];
 		doc.annotations[String(entry.id)] = record;
+	});
+}
+/**
+* Change individual fields of an existing annotation. Writing fields one by
+* one (rather than replacing the record) keeps concurrent edits, such as a
+* reply and a resolve from two reviewers, from overwriting each other.
+*/
+function updateAnnotation(id, fn) {
+	docHandle.change((doc) => {
+		const a = doc.annotations?.[String(id)];
+		if (a) fn(a);
+	});
+}
+function addReply(id, text) {
+	updateAnnotation(id, (a) => {
+		if (!a.replies) a.replies = {};
+		const rid = Date.now() + "-" + Math.random().toString(36).slice(2, 6);
+		a.replies[rid] = {
+			id: rid,
+			author: getAuthor(),
+			text,
+			timestamp: (/* @__PURE__ */ new Date()).toISOString()
+		};
+	});
+}
+/** Replies as a plain array, oldest first. */
+function repliesOf(a) {
+	return Object.values(a.replies || {}).sort((x, y) => x.timestamp.localeCompare(y.timestamp));
+}
+function getAuthor() {
+	return loadPref("author", "");
+}
+function setAuthor(name) {
+	savePref("author", name.trim());
+	document.querySelectorAll("#anno-author, #anno-identity-input").forEach((input) => {
+		if (input.value !== name) input.value = name;
 	});
 }
 function removeAnnotations(ids) {
@@ -15806,14 +16012,15 @@ function removeAnnotations(ids) {
 		for (const id of ids) delete doc.annotations[String(id)];
 	});
 }
+var syncAdapter = null;
 async function initAutomerge() {
 	const { docKey, sync } = readConfig();
 	const network = [new BroadcastChannelNetworkAdapter()];
 	const useServer = /^wss?:\/\//.test(sync);
 	const key = docKey || await sha1Hex("page|" + location.pathname);
 	if (useServer) {
-		const base = sync.replace(/\/+$/, "");
-		network.push(new WebSocketClientAdapter(`${base}/sync/${key}`));
+		syncAdapter = new WebSocketClientAdapter(`${sync.replace(/\/+$/, "")}/sync/${key}`);
+		network.push(syncAdapter);
 	}
 	repo = new Repo({
 		network,
@@ -15823,6 +16030,29 @@ async function initAutomerge() {
 	await docHandle.whenReady();
 	ensureStatuses();
 	annotations = readAnnotations();
+}
+/** Show whether changes are reaching the sync server. */
+function renderSyncStatus() {
+	const el = document.getElementById("anno-sync");
+	if (!el) return;
+	let state, label, title;
+	if (!syncAdapter) {
+		state = "local";
+		label = "Local";
+		title = "Annotations are stored in this browser only";
+	} else if (syncAdapter.socket?.readyState === WebSocket.OPEN) {
+		state = "online";
+		label = "Synced";
+		title = "Connected to the sync server";
+	} else {
+		state = "offline";
+		label = "Offline";
+		title = "Not connected — changes are saved in this browser and sent on reconnect";
+	}
+	if (el.dataset.state === state) return;
+	el.dataset.state = state;
+	el.title = title;
+	el.innerHTML = `<span class="sync-dot"></span>${label}`;
 }
 /** Rebuild highlights and the panel from the current doc state. */
 function refresh() {
@@ -15843,6 +16073,23 @@ function reApplyAllHighlights() {
 	});
 }
 var panelOpen = false;
+var filter = loadPref("filter", "open");
+var sortOrder = loadPref("sort", "document");
+var editingId = null;
+var replyingId = null;
+var drafts = {};
+function loadPref(key, fallback) {
+	try {
+		return localStorage.getItem("mergeant-" + key) ?? fallback;
+	} catch (_) {
+		return fallback;
+	}
+}
+function savePref(key, value) {
+	try {
+		localStorage.setItem("mergeant-" + key, value);
+	} catch (_) {}
+}
 function buildUI() {
 	const popup = document.createElement("div");
 	popup.id = "anno-popup";
@@ -15854,7 +16101,10 @@ function buildUI() {
         &nbsp;·&nbsp; ¶<strong id="popup-para">—</strong>
       </div>
       <div class="popup-quote" id="popup-quote"></div>
-      <textarea id="anno-comment" placeholder="Your comment… (Ctrl+Enter to save)"></textarea>
+      <label class="popup-author">Name
+        <input id="anno-author" placeholder="Your name (shown to others)" maxlength="60" autocomplete="name">
+      </label>
+      <textarea id="anno-comment" placeholder="Your comment… (Ctrl/⌘+Enter to save)"></textarea>
       <div class="popup-btns">
         <button id="anno-cancel">Cancel</button>
         <button id="anno-save">Save</button>
@@ -15864,7 +16114,7 @@ function buildUI() {
 	const fab = document.createElement("button");
 	fab.id = "anno-fab";
 	fab.title = "Show annotations";
-	fab.innerHTML = "💬";
+	fab.innerHTML = "💬<span id=\"anno-fab-count\"></span>";
 	fab.setAttribute("aria-label", "Toggle annotations panel");
 	document.body.appendChild(fab);
 	const hint = document.createElement("div");
@@ -15876,14 +16126,29 @@ function buildUI() {
 	panel.innerHTML = `
       <div id="anno-panel-header">
         <h4>📝 Annotations</h4>
-        <span id="anno-panel-badge">0</span>
+        <span id="anno-sync"></span>
+        <span id="anno-panel-badge" title="Open annotations">0</span>
+        <button class="hdr-btn" id="anno-hide-toggle"></button>
         <button id="anno-panel-toggle" aria-label="Collapse panel">▾</button>
+      </div>
+      <label id="anno-identity">Commenting as
+        <input id="anno-identity-input" placeholder="Your name" maxlength="60" autocomplete="name">
+      </label>
+      <div id="anno-toolbar" role="tablist">
+        <button class="tab" data-filter="open" role="tab">Open <span></span></button>
+        <button class="tab" data-filter="resolved" role="tab">Resolved <span></span></button>
+        <button class="tab" data-filter="all" role="tab">All <span></span></button>
+        <select id="anno-sort" aria-label="Sort annotations">
+          <option value="document">Document order</option>
+          <option value="newest">Newest first</option>
+        </select>
       </div>
       <div id="anno-panel-body"></div>
       <div id="anno-panel-footer">
+        <button id="btn-md" title="Download a Markdown checklist of the comments">⬇ MD</button>
         <button id="btn-json">⬇ JSON</button>
         <button id="btn-csv">⬇ CSV</button>
-        <button id="btn-clear" style="color:#c0392b">🗑 Clear all</button>
+        <button id="btn-clear" style="color:#c0392b" title="Delete the annotations shown in the list">🗑 Clear</button>
       </div>
     `;
 	document.body.appendChild(panel);
@@ -15892,16 +16157,47 @@ function buildUI() {
 	document.getElementById("anno-cancel").addEventListener("click", cancelPopup);
 	document.getElementById("anno-save").addEventListener("click", saveAnnotation);
 	document.getElementById("anno-comment").addEventListener("keydown", (e) => {
-		if (e.key === "Enter" && e.ctrlKey) saveAnnotation();
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) saveAnnotation();
 		if (e.key === "Escape") cancelPopup();
 	});
+	document.getElementById("btn-md").addEventListener("click", exportMarkdown);
 	document.getElementById("btn-json").addEventListener("click", exportJSON);
 	document.getElementById("btn-csv").addEventListener("click", exportCSV);
-	document.getElementById("btn-clear").addEventListener("click", clearAll);
+	document.getElementById("btn-clear").addEventListener("click", clearShown);
 	document.addEventListener("mousedown", (e) => {
 		if (popup.style.display === "block" && !popup.contains(e.target) && !e.target.closest(".anno-highlight")) cancelPopup();
 	});
+	document.querySelectorAll("#anno-author, #anno-identity-input").forEach((input) => {
+		input.value = getAuthor();
+		input.addEventListener("input", () => setAuthor(input.value));
+	});
+	document.querySelectorAll("#anno-toolbar .tab").forEach((tab) => tab.addEventListener("click", () => {
+		filter = tab.dataset.filter;
+		savePref("filter", filter);
+		renderPanel();
+	}));
+	const sort = document.getElementById("anno-sort");
+	sort.value = sortOrder;
+	sort.addEventListener("change", () => {
+		sortOrder = sort.value;
+		savePref("sort", sortOrder);
+		renderPanel();
+	});
+	document.getElementById("anno-hide-toggle").addEventListener("click", () => setHighlightsHidden(!document.body.classList.contains("anno-hide-highlights")));
+	setHighlightsHidden(loadPref("hide-highlights", "0") === "1");
+	wirePanelBody(document.getElementById("anno-panel-body"));
+	renderSyncStatus();
+	if (syncAdapter) setInterval(renderSyncStatus, 2e3);
 	renderPanel();
+}
+/** Hide highlight styling so the writer can read the page clean. */
+function setHighlightsHidden(hidden) {
+	document.body.classList.toggle("anno-hide-highlights", hidden);
+	savePref("hide-highlights", hidden ? "1" : "0");
+	const btn = document.getElementById("anno-hide-toggle");
+	btn.textContent = hidden ? "◌" : "◉";
+	btn.title = hidden ? "Show highlights in the text" : "Hide highlights in the text";
+	btn.setAttribute("aria-pressed", String(hidden));
 }
 function openPanel() {
 	panelOpen = true;
@@ -15917,7 +16213,7 @@ var pending = null;
 document.addEventListener("mouseup", handleSelect);
 document.addEventListener("touchend", handleSelect);
 function handleSelect(e) {
-	if (e.target.closest("#anno-popup, #anno-panel, #anno-fab, #anno-hint")) return;
+	if (e.target.closest?.("#anno-popup, #anno-panel, #anno-fab, #anno-hint, #rv-panel, #rv-fab")) return;
 	setTimeout(() => {
 		const sel = window.getSelection();
 		if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
@@ -15951,13 +16247,14 @@ function showPopup(e) {
 	const qt = pending.text.length > 90 ? pending.text.slice(0, 90) + "…" : pending.text;
 	document.getElementById("popup-quote").textContent = "“" + qt + "”";
 	document.getElementById("anno-comment").value = "";
+	document.getElementById("anno-author").value = getAuthor();
 	const px = Math.min(e.clientX || e.changedTouches && e.changedTouches[0].clientX || 200, window.innerWidth - 330);
-	const py = Math.min((e.clientY || e.changedTouches && e.changedTouches[0].clientY || 200) + 14, window.innerHeight - 220);
+	const py = Math.min((e.clientY || e.changedTouches && e.changedTouches[0].clientY || 200) + 14, window.innerHeight - 260);
 	const popup = document.getElementById("anno-popup");
 	popup.style.left = px + "px";
 	popup.style.top = py + "px";
 	popup.style.display = "block";
-	document.getElementById("anno-comment").focus();
+	document.getElementById(getAuthor() ? "anno-comment" : "anno-author").focus();
 }
 function cancelPopup() {
 	document.getElementById("anno-popup").style.display = "none";
@@ -15967,7 +16264,8 @@ function cancelPopup() {
 function saveAnnotation() {
 	if (!pending) return;
 	const comment = document.getElementById("anno-comment").value.trim();
-	putAnnotation({
+	setAuthor(document.getElementById("anno-author").value);
+	const entry = {
 		id: Date.now(),
 		section: pending.section,
 		paragraph: pending.para,
@@ -15975,8 +16273,12 @@ function saveAnnotation() {
 		highlight: pending.text,
 		comment,
 		timestamp: (/* @__PURE__ */ new Date()).toISOString(),
-		url: location.href
-	});
+		url: location.href,
+		author: getAuthor()
+	};
+	setHighlightsHidden(false);
+	if (filter === "resolved") filter = "open";
+	putAnnotation(entry);
 	cancelPopup();
 	if (!panelOpen) flashFab();
 }
@@ -15991,39 +16293,235 @@ function flashFab() {
 		fab.style.transform = "";
 	}, 1800);
 }
+function matchesFilter(a) {
+	if (filter === "open") return !a.resolved;
+	if (filter === "resolved") return !!a.resolved;
+	return true;
+}
+/** Order annotations by where their highlight sits on the page. */
+function inDocumentOrder(list) {
+	const pos = /* @__PURE__ */ new Map();
+	document.querySelectorAll(".anno-highlight").forEach((m, i) => {
+		if (!pos.has(m.dataset.annoId)) pos.set(m.dataset.annoId, i);
+	});
+	return list.slice().sort((a, b) => (pos.get(String(a.id)) ?? Infinity) - (pos.get(String(b.id)) ?? Infinity) || a.timestamp.localeCompare(b.timestamp));
+}
+function fmtTime(iso) {
+	return new Date(iso).toLocaleString();
+}
 function renderPanel() {
-	document.getElementById("anno-panel-badge").textContent = annotations.length;
+	const openCount = annotations.filter((a) => !a.resolved).length;
+	const counts = {
+		open: openCount,
+		resolved: annotations.length - openCount,
+		all: annotations.length
+	};
+	document.getElementById("anno-panel-badge").textContent = openCount;
+	document.getElementById("anno-fab-count").textContent = openCount || "";
+	document.querySelectorAll("#anno-toolbar .tab").forEach((tab) => {
+		tab.classList.toggle("active", tab.dataset.filter === filter);
+		tab.setAttribute("aria-selected", String(tab.dataset.filter === filter));
+		tab.querySelector("span").textContent = counts[tab.dataset.filter];
+	});
 	const body = document.getElementById("anno-panel-body");
+	const active = document.activeElement;
+	const focusKey = body.contains(active) ? active.dataset.draft : null;
+	const caret = focusKey ? active.selectionStart : 0;
 	if (!annotations.length) {
 		body.innerHTML = "<p class=\"anno-empty\">No annotations yet.<br>Select text to begin.</p>";
 		return;
 	}
-	body.innerHTML = annotations.slice().reverse().map((a) => `
-        <div class="anno-entry${a._missing ? " anno-missing" : ""}" id="ae-${a.id}">
-          <button class="e-del" data-id="${a.id}" aria-label="Delete">\u00d7</button>
+	const shown = annotations.filter(matchesFilter);
+	if (!shown.length) {
+		body.innerHTML = `<p class="anno-empty">${filter === "open" ? "No open annotations 🎉" : "No resolved annotations."}</p>`;
+		return;
+	}
+	body.innerHTML = (sortOrder === "newest" ? shown.slice().reverse() : inDocumentOrder(shown)).map(entryHTML).join("");
+	if (focusKey) {
+		const ta = body.querySelector(`[data-draft="${focusKey}"]`);
+		if (ta) {
+			ta.focus();
+			ta.setSelectionRange(caret, caret);
+		}
+	}
+}
+function entryHTML(a) {
+	const quote = a.highlight.length > 100 ? a.highlight.slice(0, 100) + "…" : a.highlight;
+	const replies = repliesOf(a);
+	const editing = editingId === a.id;
+	const replying = replyingId === a.id;
+	const classes = [
+		"anno-entry",
+		a._missing && "anno-missing",
+		a.resolved && "anno-is-resolved"
+	].filter(Boolean).join(" ");
+	const resolvedTitle = a.resolvedBy ? "Resolved by " + a.resolvedBy : "Resolved";
+	return `
+        <div class="${classes}" id="ae-${a.id}" data-id="${a.id}">
           <div class="e-meta">
-            <strong>${a.section}</strong>${a.paragraph ? " · ¶" + a.paragraph : ""}
-            <span style="float:right;font-size:10px;color:#bbb">${new Date(a.timestamp).toLocaleString()}</span>
+            <strong>${esc(a.section)}</strong>${a.paragraph ? " · ¶" + esc(a.paragraph) : ""}
+            ${a.resolved ? `<span class="e-resolved-tag" title="${esc(resolvedTitle)}">✓ Resolved</span>` : ""}
+            <span style="float:right;font-size:10px;color:#bbb">${esc(fmtTime(a.timestamp))}</span>
           </div>
-          <div class="e-quote">\u201c${a.highlight.length > 100 ? a.highlight.slice(0, 100) + "…" : a.highlight}\u201d</div>
-          ${a.comment ? `<div class="e-comment">${a.comment}</div>` : ""}
-          ${a._missing ? `<div class="e-missing">\u26a0 Text not found \u2014 document may have changed</div>` : ""}
+          <div class="e-quote" data-act="jump"${a._missing ? "" : " title=\"Show in text\""}>“${esc(quote)}”</div>
+          ${editing ? draftForm("edit", a.id, a.comment || "", "Save") : a.comment ? `<div class="e-comment">${esc(a.comment)}</div>` : ""}
+          ${a.author ? `<div class="e-author">— ${esc(a.author)}</div>` : ""}
+          ${a._missing ? `<div class="e-missing">⚠ Text not found — document may have changed</div>` : ""}
+          ${replies.length ? `<div class="e-replies">${replies.map((r) => `<div class="e-reply"><strong>${esc(r.author || "Anonymous")}</strong> ${esc(r.text)}<time>${esc(fmtTime(r.timestamp))}</time></div>`).join("")}</div>` : ""}
+          ${replying ? draftForm("reply", a.id, "", "Reply") : ""}
+          ${editing || replying ? "" : `<div class="e-actions">
+            <button data-act="reply">Reply</button>
+            <button data-act="edit">Edit</button>
+            <button data-act="resolve">${a.resolved ? "Reopen" : "Resolve"}</button>
+            <button data-act="delete">Delete</button>
+          </div>`}
         </div>
-      `).join("");
-	body.querySelectorAll(".e-del").forEach((btn) => {
-		btn.addEventListener("click", () => deleteAnno(Number(btn.dataset.id)));
+      `;
+}
+function draftForm(kind, id, initial, label) {
+	const key = `${kind}-${id}`;
+	return `
+          <div class="e-form">
+            <textarea data-draft="${key}" placeholder="${kind === "reply" ? "Write a reply… (Ctrl/⌘+Enter to send)" : "Edit comment… (Ctrl/⌘+Enter to save)"}">${esc(drafts[key] ?? initial)}</textarea>
+            <div class="e-form-btns">
+              <button data-act="cancel">Cancel</button>
+              <button data-act="${kind}-save">${label}</button>
+            </div>
+          </div>`;
+}
+/** One set of delegated listeners, since the body is re-rendered on every change. */
+function wirePanelBody(body) {
+	body.addEventListener("click", (e) => {
+		const target = e.target.closest("[data-act]");
+		const entry = target?.closest(".anno-entry");
+		if (!entry) return;
+		const id = Number(entry.dataset.id);
+		const draft = (kind) => (drafts[`${kind}-${id}`] ?? "").trim();
+		switch (target.dataset.act) {
+			case "jump":
+				jumpToHighlight(id);
+				break;
+			case "resolve":
+				updateAnnotation(id, (a) => {
+					a.resolved = !a.resolved;
+					a.resolvedBy = a.resolved ? getAuthor() : "";
+				});
+				break;
+			case "edit":
+				editingId = id;
+				replyingId = null;
+				openForm(`edit-${id}`);
+				break;
+			case "reply":
+				replyingId = id;
+				editingId = null;
+				openForm(`reply-${id}`);
+				break;
+			case "cancel":
+				closeForms();
+				renderPanel();
+				break;
+			case "edit-save": {
+				const text = drafts[`edit-${id}`];
+				closeForms();
+				if (text != null) updateAnnotation(id, (a) => a.comment = text.trim());
+				else renderPanel();
+				break;
+			}
+			case "reply-save": {
+				const text = draft("reply");
+				if (!text) return;
+				if (!getAuthor()) {
+					const name = prompt("Your name, shown next to your reply:");
+					if (name) setAuthor(name);
+				}
+				closeForms();
+				addReply(id, text);
+				break;
+			}
+			case "delete": {
+				const replies = repliesOf(annotations.find((a) => a.id === id) || {});
+				const msg = replies.length ? `Delete this annotation and its ${replies.length} repl${replies.length === 1 ? "y" : "ies"}?` : "Delete this annotation?";
+				if (confirm(msg)) deleteAnno(id);
+				break;
+			}
+		}
 	});
+	body.addEventListener("input", (e) => {
+		if (e.target.dataset.draft) drafts[e.target.dataset.draft] = e.target.value;
+	});
+	body.addEventListener("keydown", (e) => {
+		if (!e.target.dataset.draft) return;
+		const form = e.target.closest(".e-form");
+		if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) form.querySelector("[data-act$=\"-save\"]").click();
+		if (e.key === "Escape") {
+			e.stopPropagation();
+			form.querySelector("[data-act=\"cancel\"]").click();
+		}
+	});
+}
+function openForm(key) {
+	renderPanel();
+	const ta = document.querySelector(`#anno-panel-body [data-draft="${key}"]`);
+	if (ta) {
+		ta.focus();
+		ta.setSelectionRange(ta.value.length, ta.value.length);
+	}
+}
+function closeForms() {
+	for (const key of Object.keys(drafts)) if (key === `edit-${editingId}` || key === `reply-${replyingId}`) delete drafts[key];
+	editingId = replyingId = null;
 }
 function deleteAnno(id) {
 	removeAnnotations([id]);
 }
-function clearAll() {
-	if (!confirm("Delete all annotations from this page?")) return;
-	removeAnnotations(annotations.map((a) => a.id));
+function clearShown() {
+	const shown = annotations.filter(matchesFilter);
+	if (!shown.length) return;
+	const which = filter === "all" ? "" : filter + " ";
+	const shared = syncAdapter ? " This removes them for every reviewer." : "";
+	if (!confirm(`Delete all ${shown.length} ${which}annotations on this page?${shared}`)) return;
+	removeAnnotations(shown.map((a) => a.id));
+}
+function pageTitle() {
+	return document.querySelector("h1.title")?.textContent.trim() || document.title || "annotations";
+}
+function exportName(ext) {
+	const slug = pageTitle().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 60);
+	return `annotations${slug ? "-" + slug : ""}.${ext}`;
+}
+function exportRecords() {
+	return annotations.map(({ _missing, replies, ...rest }) => ({
+		...rest,
+		resolved: !!rest.resolved,
+		replies: repliesOf({ replies })
+	}));
+}
+/** A checklist the writer can work through, grouped by section. */
+function exportMarkdown() {
+	const openCount = annotations.filter((a) => !a.resolved).length;
+	const lines = [
+		`# Review comments: ${pageTitle()}`,
+		"",
+		`Exported ${(/* @__PURE__ */ new Date()).toLocaleString()} · ${openCount} open, ${annotations.length - openCount} resolved`
+	];
+	const indent = (text) => text.replace(/\n/g, "\n  ");
+	let section;
+	for (const a of inDocumentOrder(annotations)) {
+		if (a.section !== section) {
+			section = a.section;
+			lines.push("", `## ${section || "—"}`, "");
+		}
+		const quote = a.highlight.replace(/\s+/g, " ");
+		const where = a.paragraph ? ` (¶${a.paragraph})` : "";
+		lines.push(`- [${a.resolved ? "x" : " "}] “${quote}”${where}`);
+		if (a.comment) lines.push(`  ${a.author ? `**${a.author}:** ` : ""}${indent(a.comment)}`);
+		for (const r of repliesOf(a)) lines.push(`  - **${r.author || "Anonymous"}:** ${indent(r.text)}`);
+	}
+	dl(new Blob([lines.join("\n") + "\n"], { type: "text/markdown" }), exportName("md"));
 }
 function exportJSON() {
-	const clean = annotations.map(({ _missing, ...rest }) => rest);
-	dl(new Blob([JSON.stringify(clean, null, 2)], { type: "application/json" }), "annotations.json");
+	dl(new Blob([JSON.stringify(exportRecords(), null, 2)], { type: "application/json" }), exportName("json"));
 }
 function exportCSV() {
 	const cols = [
@@ -16033,11 +16531,18 @@ function exportCSV() {
 		"occurrenceIndex",
 		"highlight",
 		"comment",
+		"author",
+		"resolved",
+		"resolvedBy",
+		"replies",
 		"timestamp",
 		"url"
 	];
-	const rows = annotations.map((a) => cols.map((k) => "\"" + String(a[k] ?? "").replace(/"/g, "\"\"") + "\"").join(","));
-	dl(new Blob([[cols.join(","), ...rows].join("\n")], { type: "text/csv" }), "annotations.csv");
+	const rows = exportRecords().map((a) => {
+		a.replies = a.replies.map((r) => `${r.author || "Anonymous"}: ${r.text}`).join(" | ");
+		return cols.map((k) => "\"" + String(a[k] ?? "").replace(/"/g, "\"\"") + "\"").join(",");
+	});
+	dl(new Blob([[cols.join(","), ...rows].join("\n")], { type: "text/csv" }), exportName("csv"));
 }
 function dl(blob, name) {
 	const a = document.createElement("a");
@@ -16052,8 +16557,8 @@ async function boot() {
 	await initAutomerge();
 	reApplyAllHighlights();
 	buildUI();
-	initReview(docHandle);
 	docHandle.on("change", refresh);
+	initReview(docHandle);
 }
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", () => boot());
 else boot();
