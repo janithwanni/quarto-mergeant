@@ -15289,9 +15289,14 @@ function cycleStatus(key) {
 /** Open (unresolved) annotation highlights per paragraph key, read from the page. */
 function openCommentCounts() {
 	const counts = {};
+	const seen = /* @__PURE__ */ new Set();
 	document.querySelectorAll(".anno-highlight:not(.anno-resolved)").forEach((mark) => {
 		const p = mark.closest("p[data-para]");
-		if (p) counts["p" + p.dataset.para] = (counts["p" + p.dataset.para] || 0) + 1;
+		if (!p) return;
+		const key = "p" + p.dataset.para;
+		if (seen.has(key + ":" + mark.dataset.annoId)) return;
+		seen.add(key + ":" + mark.dataset.annoId);
+		counts[key] = (counts[key] || 0) + 1;
 	});
 	return counts;
 }
@@ -15560,7 +15565,7 @@ function renderProgress(statuses) {
 //#region src/main.js
 console.log("start automerge");
 function autoTag() {
-	const root = document.querySelector("main.content") || document.querySelector("#quarto-content") || document.body;
+	const root = contentRoot();
 	let currentSection = "Preamble";
 	let paraIndex = 0;
 	const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
@@ -15584,37 +15589,62 @@ function autoTag() {
 		if (h) div.dataset.section = h.textContent.replace(/\s*#\s*$/, "").trim();
 	});
 }
+/** Where annotatable text lives. */
+function contentRoot() {
+	return document.querySelector("main.content") || document.querySelector("#quarto-content") || document.body;
+}
+var NOT_CONTENT = "script, style, noscript, #anno-popup, #anno-panel, #anno-fab, #anno-hint, #rv-panel, #rv-fab";
+var NO_MARK_CHILD = new Set([
+	"TABLE",
+	"THEAD",
+	"TBODY",
+	"TFOOT",
+	"TR",
+	"COLGROUP",
+	"UL",
+	"OL",
+	"DL",
+	"SELECT"
+]);
+var WS = /\s/;
+function textNodesIn(scopeEl) {
+	if (scopeEl.nodeType === 3) return [scopeEl];
+	const out = [];
+	const tw = document.createTreeWalker(scopeEl, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, { acceptNode: (n) => n.nodeType === 3 ? NodeFilter.FILTER_ACCEPT : n.matches(NOT_CONTENT) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_SKIP });
+	let n;
+	while (n = tw.nextNode()) out.push(n);
+	return out;
+}
 /**
 * Return an array of Range objects — one per occurrence of searchText
-* inside paraEl, spanning across text-node boundaries if needed.
+* inside scopeEl, in document order. Whitespace is ignored on both sides,
+* and a match may span text-node and element boundaries.
 */
-function findTextRanges(paraEl, searchText) {
-	const textNodes = [];
-	const tw = document.createTreeWalker(paraEl, NodeFilter.SHOW_TEXT);
-	let n;
-	while (n = tw.nextNode()) textNodes.push(n);
-	const charMap = [];
-	let combined = "";
-	for (const tn of textNodes) for (let i = 0; i < tn.nodeValue.length; i++) {
-		charMap.push({
-			node: tn,
-			offset: i
-		});
-		combined += tn.nodeValue[i];
-	}
-	const results = [];
-	let from = 0;
-	while (from < combined.length) {
-		const idx = combined.indexOf(searchText, from);
-		if (idx === -1) break;
-		const endIdx = idx + searchText.length - 1;
-		if (charMap[idx] && charMap[endIdx]) {
-			const range = document.createRange();
-			range.setStart(charMap[idx].node, charMap[idx].offset);
-			range.setEnd(charMap[endIdx].node, charMap[endIdx].offset + 1);
-			results.push(range);
+function findTextRanges(scopeEl, searchText) {
+	const needle = String(searchText ?? "").replace(/\s+/g, "");
+	if (!needle) return [];
+	const nodes = textNodesIn(scopeEl);
+	const nodeOf = [];
+	const offsetOf = [];
+	let haystack = "";
+	nodes.forEach((tn, ni) => {
+		const value = tn.nodeValue;
+		for (let i = 0; i < value.length; i++) {
+			if (WS.test(value[i])) continue;
+			nodeOf.push(ni);
+			offsetOf.push(i);
+			haystack += value[i];
 		}
-		from = idx + 1;
+	});
+	const results = [];
+	let idx = haystack.indexOf(needle);
+	while (idx !== -1) {
+		const end = idx + needle.length - 1;
+		const range = document.createRange();
+		range.setStart(nodes[nodeOf[idx]], offsetOf[idx]);
+		range.setEnd(nodes[nodeOf[end]], offsetOf[end] + 1);
+		results.push(range);
+		idx = haystack.indexOf(needle, idx + 1);
 	}
 	return results;
 }
@@ -15623,33 +15653,43 @@ function findTextRanges(paraEl, searchText) {
 * Returns true if the text was found and wrapped, false otherwise.
 */
 function reHighlight(annotation) {
-	const paraEl = annotation.paragraph ? document.querySelector(`[data-para="${annotation.paragraph}"]`) : null;
-	if (paraEl) {
-		const idx = annotation.occurrenceIndex ?? 0;
-		const range = findTextRanges(paraEl, annotation.highlight)[idx];
-		if (range) {
-			wrapRange(range, annotation);
-			return true;
+	const idx = annotation.occurrenceIndex ?? 0;
+	let range;
+	if (annotation.paragraph) {
+		const paraEl = document.querySelector(`[data-para="${annotation.paragraph}"]`);
+		range = paraEl && findTextRanges(paraEl, annotation.highlight)[idx];
+		if (!range) {
+			const matches = findTextRanges(contentRoot(), annotation.highlight);
+			if (matches.length === 1) range = matches[0];
 		}
+	} else {
+		const matches = findTextRanges(contentRoot(), annotation.highlight);
+		range = matches[idx] || matches[0];
 	}
-	const matches = [...document.querySelectorAll("[data-para]")].flatMap((p) => findTextRanges(p, annotation.highlight));
-	if (matches.length !== 1) return false;
-	wrapRange(matches[0], annotation);
+	if (!range) return false;
+	wrapRange(range, annotation);
 	return true;
 }
 /**
-* Wrap a Range in a <mark>.
-* Uses surroundContents when possible; falls back to extractContents
-* for selections that cross element boundaries.
+* Highlight a Range by wrapping each piece of text inside it in its own
+* <mark>. One annotation can therefore own several marks (same data-anno-id)
+* when it crosses inline elements or blocks; the document structure itself is
+* never moved, so unwrapping restores the page exactly.
 */
 function wrapRange(range, annotation) {
-	const mark = createMark(annotation);
-	try {
-		range.surroundContents(mark);
-	} catch (_) {
-		const fragment = range.extractContents();
-		mark.appendChild(fragment);
-		range.insertNode(mark);
+	const { startContainer, startOffset, endContainer, endOffset } = range;
+	const nodes = textNodesIn(range.commonAncestorContainer).filter((n) => range.intersectsNode(n));
+	for (const node of nodes) {
+		const from = node === startContainer ? startOffset : 0;
+		const to = node === endContainer ? endOffset : node.nodeValue.length;
+		if (from >= to) continue;
+		if (NO_MARK_CHILD.has(node.parentElement?.tagName) && !node.nodeValue.slice(from, to).trim()) continue;
+		let piece = node;
+		if (to < piece.nodeValue.length) piece.splitText(to);
+		if (from > 0) piece = piece.splitText(from);
+		const mark = createMark(annotation);
+		piece.parentNode.insertBefore(mark, piece);
+		mark.appendChild(piece);
 	}
 }
 function createMark(annotation) {
@@ -16217,20 +16257,14 @@ function handleSelect(e) {
 	setTimeout(() => {
 		const sel = window.getSelection();
 		if (!sel || sel.isCollapsed || !sel.toString().trim()) return;
-		const text = sel.toString().trim();
 		const range = sel.getRangeAt(0);
+		const text = range.toString().replace(/\s+/g, " ").trim();
+		if (!text) return;
 		const anchor = range.commonAncestorContainer;
 		const el = anchor.nodeType === 3 ? anchor.parentElement : anchor;
 		const paraEl = el.closest("[data-para]");
 		const sectEl = el.closest("[data-section]");
-		let occurrenceIndex = 0;
-		if (paraEl) {
-			const allRanges = findTextRanges(paraEl, text);
-			for (let i = 0; i < allRanges.length; i++) if (allRanges[i].startContainer === range.startContainer && allRanges[i].startOffset === range.startOffset) {
-				occurrenceIndex = i;
-				break;
-			}
-		}
+		const occurrenceIndex = Math.max(0, findTextRanges(paraEl || contentRoot(), text).findIndex((r) => r.compareBoundaryPoints(Range.START_TO_START, range) >= 0));
 		pending = {
 			text,
 			range: range.cloneRange(),
